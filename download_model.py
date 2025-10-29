@@ -17,4 +17,3 @@ if not os.path.exists(output):
     print("✅ Modelo descargado correctamente")
 else:
     print("✅ Modelo ya existe")
-```
