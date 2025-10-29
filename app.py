@@ -8,6 +8,14 @@ from PIL import Image
 import tensorflow as tf
 from tensorflow import keras
 import cv2
+import os
+
+# Descargar modelo si no existe
+if not os.path.exists('golanalytics_vision_model.keras'):
+    print("📥 Modelo no encontrado, descargando...")
+    import download_model
+else:
+    print("✅ Modelo ya existe localmente")
 
 app = Flask(__name__)
 CORS(app)
