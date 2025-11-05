@@ -39,6 +39,22 @@ def home():
         "message": "API funcionando correctamente"
     })
 
+def preprocess_image(image_base64):
+    """Helper function to preprocess a single image"""
+    # Decodificar imagen
+    image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
+    image = Image.open(BytesIO(image_data))
+    
+    # Convertir a formato correcto
+    image = image.convert('RGB')
+    image = np.array(image)
+    
+    # Preprocesar
+    image = cv2.resize(image, (224, 224))
+    image = image.astype(np.float32) / 255.0
+    
+    return image
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -49,17 +65,8 @@ def predict():
         if not image_base64:
             return jsonify({"success": False, "error": "No image provided"}), 400
         
-        # Decodificar imagen
-        image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
-        image = Image.open(BytesIO(image_data))
-        
-        # Convertir a formato correcto
-        image = image.convert('RGB')
-        image = np.array(image)
-        
-        # Preprocesar
-        image = cv2.resize(image, (224, 224))
-        image = image.astype(np.float32) / 255.0
+        # Preprocesar imagen
+        image = preprocess_image(image_base64)
         image = np.expand_dims(image, axis=0)
         
         # Predecir
@@ -86,6 +93,74 @@ def predict():
             "error": str(e)
         }), 500
 
+@app.route('/analyze-batch', methods=['POST'])
+def analyze_batch():
+    try:
+        data = request.get_json()
+        
+        # Obtener array de frames
+        frames = data.get('frames', [])
+        if not frames or not isinstance(frames, list):
+            return jsonify({"success": False, "error": "No frames provided or invalid format"}), 400
+        
+        if len(frames) > 50:
+            return jsonify({"success": False, "error": "Maximum 50 frames per batch"}), 400
+        
+        # Preprocesar todas las imágenes
+        processed_images = []
+        valid_indices = []
+        
+        for idx, frame_data in enumerate(frames):
+            try:
+                image_base64 = frame_data.get('image', '')
+                if image_base64:
+                    image = preprocess_image(image_base64)
+                    processed_images.append(image)
+                    valid_indices.append(idx)
+            except Exception as e:
+                print(f"Error processing frame {idx}: {str(e)}")
+                continue
+        
+        if not processed_images:
+            return jsonify({"success": False, "error": "No valid frames to process"}), 400
+        
+        # Convertir a batch
+        batch = np.array(processed_images)
+        
+        # Predecir en batch (más eficiente)
+        predictions_batch = model.predict(batch, verbose=0)
+        
+        # Procesar resultados
+        results = []
+        for idx, predictions in zip(valid_indices, predictions_batch):
+            # Obtener top 3
+            top_indices = np.argsort(predictions)[-3:][::-1]
+            
+            frame_results = []
+            for pred_idx in top_indices:
+                frame_results.append({
+                    "action": class_names[pred_idx],
+                    "probability": float(predictions[pred_idx])
+                })
+            
+            results.append({
+                "frame_index": idx,
+                "timestamp": frames[idx].get('timestamp', 0),
+                "predictions": frame_results
+            })
+        
+        return jsonify({
+            "success": True,
+            "total_frames": len(frames),
+            "processed_frames": len(results),
+            "results": results
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
-
