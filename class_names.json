@@ -1,1 +1,26 @@
-["1_vs_1_defensivo", "1_vs_1_ofensivo", "Atajadas", "A\u00e9reo_defensivo", "A\u00e9reo_ofensivo", "Goles_a_favor", "Goles_recibidos", "Pase_corto_defensivo", "Pase_corto_ofensivo", "Pase_largo_defensivo", "Pase_largo_ofensivo", "P\u00e9rdida_de_bal\u00f3n", "Recuperaci\u00f3n_de_bal\u00f3n", "Tiros_a_porter\u00eda", "Transici\u00f3n_ofensiva_lograda", "Transici\u00f3n_ofensiva_no_lograda"]
+{
+  "0": "1_vs_1_defensivo_fallado",
+  "1": "1_vs_1_defensivo_logrado",
+  "2": "1_vs_1_ofensivo_fallado",
+  "3": "1_vs_1_ofensivo_logrado",
+  "4": "Aereo_defensivo_fallado",
+  "5": "Aereo_defensivo_logrado",
+  "6": "Aereo_ofensivo_fallado",
+  "7": "Aereo_ofensivo_logrado",
+  "8": "Atajadas",
+  "9": "Goles_a_favor",
+  "10": "Goles_recibidos",
+  "11": "Pase_corto_defensivo_fallado",
+  "12": "Pase_corto_defensivo_logrado",
+  "13": "Pase_corto_ofensivo_fallado",
+  "14": "Pase_corto_ofensivo_logrado",
+  "15": "Pase_largo_defensivo_fallado",
+  "16": "Pase_largo_defensivo_logrado",
+  "17": "Pase_largo_ofensivo_fallado",
+  "18": "Pase_largo_ofensivo_logrado",
+  "19": "Perdida_de_balon",
+  "20": "Recuperacion_de_balon",
+  "21": "Tiros_a_porteria",
+  "22": "Transición_ofensiva_lograda_logrado",
+  "23": "Transición_ofensiva_no_lograda_fallado"
+}
