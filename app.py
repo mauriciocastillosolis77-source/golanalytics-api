@@ -9,27 +9,23 @@ import tensorflow as tf
 from tensorflow import keras
 import cv2
 import os
-
+model_path = 'golanalytics_vision_model.keras'
 # Descargar modelo si no existe
-if not os.path.exists('golanalytics_vision_model.keras'):
+if not os.path.exists(model_path):
     print("📥 Modelo no encontrado, descargando...")
     import download_model
 else:
     print("✅ Modelo ya existe localmente")
-
 app = Flask(__name__)
 CORS(app)
-
 # Cargar modelo al iniciar
 print("🤖 Cargando modelo...")
-model = keras.models.load_model('golanalytics_vision_model.keras')
+model = keras.models.load_model(model_path)
 print("✅ Modelo cargado")
-
 # Cargar nombres de clases
 with open('class_names.json', 'r', encoding='utf-8') as f:
     class_names = json.load(f)
 print(f"✅ {len(class_names)} clases cargadas")
-
 @app.route('/')
 def home():
     return jsonify({
@@ -38,7 +34,6 @@ def home():
         "classes": len(class_names),
         "message": "API funcionando correctamente"
     })
-
 def preprocess_image(image_base64):
     """Helper function to preprocess a single image"""
     # Decodificar imagen
@@ -54,7 +49,6 @@ def preprocess_image(image_base64):
     image = image.astype(np.float32) / 255.0
     
     return image
-
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -78,7 +72,7 @@ def predict():
         results = []
         for idx in top_indices:
             results.append({
-                "action": class_names[idx],
+                "action": class_names[str(idx)],
                 "probability": float(predictions[idx])
             })
         
@@ -92,7 +86,6 @@ def predict():
             "success": False,
             "error": str(e)
         }), 500
-
 @app.route('/analyze-batch', methods=['POST'])
 def analyze_batch():
     try:
@@ -139,7 +132,7 @@ def analyze_batch():
             frame_results = []
             for pred_idx in top_indices:
                 frame_results.append({
-                    "action": class_names[pred_idx],
+                    "action": class_names[str(pred_idx)],
                     "probability": float(predictions[pred_idx])
                 })
             
@@ -161,6 +154,5 @@ def analyze_batch():
             "success": False,
             "error": str(e)
         }), 500
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
