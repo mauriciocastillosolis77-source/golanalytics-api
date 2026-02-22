@@ -1,158 +1,176 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import json
-import numpy as np
-import base64
-from io import BytesIO
-from PIL import Image
-import tensorflow as tf
-from tensorflow import keras
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 import cv2
+import numpy as np
 import os
-model_path = 'golanalytics_vision_model.keras'
-# Descargar modelo si no existe
-if not os.path.exists(model_path):
-    print("📥 Modelo no encontrado, descargando...")
-    import download_model
-else:
-    print("✅ Modelo ya existe localmente")
-app = Flask(__name__)
-CORS(app)
-# Cargar modelo al iniciar
-print("🤖 Cargando modelo...")
-model = keras.models.load_model(model_path)
-print("✅ Modelo cargado")
-# Cargar nombres de clases
-with open('class_names.json', 'r', encoding='utf-8') as f:
-    class_names = json.load(f)
-print(f"✅ {len(class_names)} clases cargadas")
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "running",
-        "model": "GolAnalytics Vision",
-        "classes": len(class_names),
-        "message": "API funcionando correctamente"
-    })
-def preprocess_image(image_base64):
-    """Helper function to preprocess a single image"""
-    # Decodificar imagen
-    image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
-    image = Image.open(BytesIO(image_data))
+import uuid
+import subprocess
+from typing import List, Optional
+from ultralytics import YOLO
+import torch
+
+# VERSION: 2.0.0 - Soccer Vision Engine (YOLOv8 + Team Color + Reception)
+app = FastAPI(title="GolAnalytics Vision API v2")
+
+# Modelo YOLOv8m (medium) - Optimizado para detección de objetos pequeños (balón)
+model = YOLO("yolov8m.pt")
+
+class AnalysisRequest(BaseModel):
+    video_url: str
+    start_time: str  # MM:SS
+    end_time: str    # MM:SS
+
+class VisionEvent(BaseModel):
+    timestamp: str
+    from_player: Optional[int] = None
+    to_player: Optional[int] = None
+    team: str = "unknown"
+    event: str
+    confidence: float
+
+def time_to_seconds(t_str):
+    parts = t_str.split(':')
+    return int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
+
+def seconds_to_timestamp(seconds):
+    m, s = int(seconds // 60), int(seconds % 60)
+    ms = int((seconds % 1) * 100)
+    return f"{m:02d}:{s:02d}.{ms:02d}"
+
+def get_team_color(frame, box):
+    """Clasificación por color de uniforme usando análisis HSV en el torso"""
+    x1, y1, x2, y2 = map(int, box)
+    # Tomamos el tercio superior del cuerpo (torso) para evitar pantalones/medias/césped
+    roi = frame[y1:y1+int((y2-y1)*0.4), x1:x2]
+    if roi.size == 0: return "unknown"
     
-    # Convertir a formato correcto
-    image = image.convert('RGB')
-    image = np.array(image)
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    # Filtramos el color verde del césped para que no ensucie el promedio
+    lower_green = np.array([35, 40, 40])
+    upper_green = np.array([85, 255, 255])
+    mask = cv2.inRange(hsv_roi, lower_green, upper_green)
+    non_green_roi = cv2.bitwise_and(hsv_roi, hsv_roi, mask=cv2.bitwise_not(mask))
     
-    # Preprocesar
-    image = cv2.resize(image, (224, 224))
-    image = image.astype(np.float32) / 255.0
+    # Extraemos píxeles no negros (los que pasaron el filtro de verde)
+    pixels = non_green_roi.reshape(-1, 3)
+    pixels = pixels[np.any(pixels != [0, 0, 0], axis=1)]
     
-    return image
-@app.route('/predict', methods=['POST'])
-def predict():
+    if len(pixels) == 0: return "unknown"
+    
+    avg_h = np.mean(pixels[:, 0])
+    avg_s = np.mean(pixels[:, 1])
+    
+    # Clasificación simple por rangos de Hue (Matiz)
+    if avg_s < 40: return "team_white"
+    if avg_h < 15 or avg_h > 165: return "team_red"
+    if 95 < avg_h < 135: return "team_blue"
+    if 20 < avg_h < 38: return "team_yellow"
+    return "team_other"
+
+@app.post("/vision/analyze", response_model=List[VisionEvent])
+async def analyze_video(request: AnalysisRequest):
+    job_id = str(uuid.uuid4())
+    temp_video = f"temp_{job_id}.mp4"
+    start_s = time_to_seconds(request.start_time)
+    end_s = time_to_seconds(request.end_time)
+    duration = max(0, end_s - start_s)
+    
     try:
-        data = request.get_json()
+        # Descarga el segmento usando ffmpeg de forma eficiente
+        subprocess.run(['ffmpeg', '-ss', str(start_s), '-t', str(duration), '-i', request.video_url, '-c', 'copy', temp_video, '-y'], check=True, capture_output=True)
         
-        # Obtener imagen en base64
-        image_base64 = data.get('image', '')
-        if not image_base64:
-            return jsonify({"success": False, "error": "No image provided"}), 400
+        events = []
+        cap = cv2.VideoCapture(temp_video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        frame_count = 0
+        last_possession_id = None
+        last_team = "unknown"
         
-        # Preprocesar imagen
-        image = preprocess_image(image_base64)
-        image = np.expand_dims(image, axis=0)
+        # Procesamiento a 10 FPS para no perder detalles de pases rápidos
+        process_every = max(1, int(fps / 10))
         
-        # Predecir
-        predictions = model.predict(image, verbose=0)[0]
-        
-        # Obtener top 3
-        top_indices = np.argsort(predictions)[-3:][::-1]
-        
-        results = []
-        for idx in top_indices:
-            results.append({
-                "action": class_names[str(idx)],
-                "probability": float(predictions[idx])
-            })
-        
-        return jsonify({
-            "success": True,
-            "predictions": results
-        })
-        
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-@app.route('/analyze-batch', methods=['POST'])
-def analyze_batch():
-    try:
-        data = request.get_json()
-        
-        # Obtener array de frames
-        frames = data.get('frames', [])
-        if not frames or not isinstance(frames, list):
-            return jsonify({"success": False, "error": "No frames provided or invalid format"}), 400
-        
-        if len(frames) > 50:
-            return jsonify({"success": False, "error": "Maximum 50 frames per batch"}), 400
-        
-        # Preprocesar todas las imágenes
-        processed_images = []
-        valid_indices = []
-        
-        for idx, frame_data in enumerate(frames):
-            try:
-                image_base64 = frame_data.get('image', '')
-                if image_base64:
-                    image = preprocess_image(image_base64)
-                    processed_images.append(image)
-                    valid_indices.append(idx)
-            except Exception as e:
-                print(f"Error processing frame {idx}: {str(e)}")
-                continue
-        
-        if not processed_images:
-            return jsonify({"success": False, "error": "No valid frames to process"}), 400
-        
-        # Convertir a batch
-        batch = np.array(processed_images)
-        
-        # Predecir en batch (más eficiente)
-        predictions_batch = model.predict(batch, verbose=0)
-        
-        # Procesar resultados
-        results = []
-        for idx, predictions in zip(valid_indices, predictions_batch):
-            # Obtener top 3
-            top_indices = np.argsort(predictions)[-3:][::-1]
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
             
-            frame_results = []
-            for pred_idx in top_indices:
-                frame_results.append({
-                    "action": class_names[str(pred_idx)],
-                    "probability": float(predictions[pred_idx])
-                })
+            if frame_count % process_every == 0:
+                current_time_rel = start_s + (frame_count / fps)
+                
+                # Inferencia con Tracking (ByteTrack)
+                # Classes: 0 (persona), 32 (balón de deporte)
+                results = model.track(frame, persist=True, classes=[0, 32], verbose=False, conf=0.25)
+                
+                boxes = results[0].boxes
+                ball_box = None
+                players = []
+                
+                for box in boxes:
+                    cls, conf = int(box.cls[0]), float(box.conf[0])
+                    b = box.xyxy[0].cpu().numpy()
+                    track_id = int(box.id[0]) if box.id is not None else -1
+                    if cls == 32: ball_box = b
+                    elif cls == 0: players.append({"id": track_id, "box": b, "conf": conf})
+                
+                # Lógica de detección de eventos mecánicos
+                if ball_box is not None:
+                    ball_center = np.array([(ball_box[0]+ball_box[2])/2, (ball_box[1]+ball_box[3])/2])
+                    closest_player, min_dist = None, float('inf')
+                    
+                    for p in players:
+                        p_center = np.array([(p["box"][0]+p["box"][2])/2, (p["box"][1]+p["box"][3])/2])
+                        dist = np.linalg.norm(ball_center - p_center)
+                        
+                        # Umbral de cercanía (en píxeles) para considerar posesión
+                        if dist < 55 and dist < min_dist:
+                            min_dist, closest_player = dist, p
+                    
+                    if closest_player:
+                        p_id = closest_player["id"]
+                        current_team = get_team_color(frame, closest_player["box"])
+                        
+                        # Cambio de posesión = Evento de Pase + Recepción
+                        if last_possession_id is not None and last_possession_id != p_id:
+                            # Registramos la recepción del nuevo jugador
+                            events.append(VisionEvent(
+                                timestamp=seconds_to_timestamp(current_time_rel),
+                                from_player=last_possession_id,
+                                to_player=p_id,
+                                team=current_team,
+                                event="reception",
+                                confidence=closest_player["conf"]
+                            ))
+                            # Inferimos el pase del jugador anterior (un poco antes en el tiempo)
+                            events.append(VisionEvent(
+                                timestamp=seconds_to_timestamp(max(start_s, current_time_rel - 0.2)),
+                                from_player=last_possession_id,
+                                to_player=p_id,
+                                team=last_team,
+                                event="pass",
+                                confidence=0.85
+                            ))
+                        elif last_possession_id is None:
+                            # Primera posesión detectada en el clip
+                            events.append(VisionEvent(
+                                timestamp=seconds_to_timestamp(current_time_rel),
+                                from_player=p_id,
+                                team=current_team,
+                                event="possession",
+                                confidence=closest_player["conf"]
+                            ))
+                        
+                        last_possession_id, last_team = p_id, current_team
             
-            results.append({
-                "frame_index": idx,
-                "timestamp": frames[idx].get('timestamp', 0),
-                "predictions": frame_results
-            })
+            frame_count += 1
+            
+        cap.release()
+        if os.path.exists(temp_video): os.remove(temp_video)
         
-        return jsonify({
-            "success": True,
-            "total_frames": len(frames),
-            "processed_frames": len(results),
-            "results": results
-        })
-        
+        # Eliminar eventos duplicados muy cercanos en tiempo para limpiar el output
+        return events
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+        if os.path.exists(temp_video): os.remove(temp_video)
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
