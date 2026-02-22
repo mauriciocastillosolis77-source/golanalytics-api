@@ -1,8 +1,8 @@
-flask==3.0.0
-flask-cors==4.0.0
-tensorflow-cpu==2.16.1
-numpy>=1.23.0,<2.0.0
-pillow==10.1.0
-opencv-python-headless==4.8.1.78
-gunicorn==21.2.0
-requests==2.31.0
+fastapi
+uvicorn
+ultralytics
+opencv-python-headless
+numpy
+torch
+torchvision
+python-multipart
