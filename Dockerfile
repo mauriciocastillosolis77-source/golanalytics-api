@@ -12,17 +12,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Descarga el modelo durante la construcción de la imagen para despliegues rápidos
+# Descarga el modelo durante la construcción de la imagen
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8m.pt')"
 
-# Aseguramos que uvicorn esté instalado
+# Instalamos uvicorn explícitamente
 RUN pip install --no-cache-dir uvicorn
 
 COPY app.py .
 
-# Railway asigna un puerto dinámico a la variable $PORT
+# Variable de entorno PORT manejada por Railway
 ENV PORT=8080
-EXPOSE 8080
 
-# Usamos sh -c para que la variable $PORT sea interpretada correctamente por el shell
-CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# Forzamos el uso de uvicorn a través de un shell para que interprete $PORT
+# Esto soluciona tanto el problema de 'gunicorn not found' como el de 'invalid port'
+ENTRYPOINT ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
