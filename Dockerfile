@@ -25,5 +25,5 @@ ENV PORT=8080
 
 # Forzamos el uso de python -m uvicorn y deshabilitamos cualquier autodetección de Railway
 # Al usar una cadena simple en CMD sin corchetes, se ejecuta en un shell que procesa $PORT
-CMD python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+CMD sh -c "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"
 
