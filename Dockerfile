@@ -23,6 +23,7 @@ COPY app.py .
 # Variable de entorno PORT manejada por Railway
 ENV PORT=8080
 
-# Forzamos el uso de uvicorn a través de un shell para que interprete $PORT
-# Esto soluciona tanto el problema de 'gunicorn not found' como el de 'invalid port'
-ENTRYPOINT ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# Forzamos el uso de python -m uvicorn y deshabilitamos cualquier autodetección de Railway
+# Al usar una cadena simple en CMD sin corchetes, se ejecuta en un shell que procesa $PORT
+CMD python -m uvicorn app:app --host 0.0.0.0 --port $PORT
+
