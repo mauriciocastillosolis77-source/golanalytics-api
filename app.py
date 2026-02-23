@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import cv2
 import numpy as np
@@ -9,16 +10,23 @@ from typing import List, Optional
 from ultralytics import YOLO
 import torch
 
-# VERSION: 3.0.0 - Soccer Vision Engine (YOLOv8 + Team Color + Reception + 10 FPS)
-app = FastAPI(title="GolAnalytics Vision API v3")
+# VERSION: 7.0.0 - Soccer Vision Engine (YOLOv8 + Team Color + Reception + 10 FPS + CORS)
+app = FastAPI(title="GolAnalytics Vision API v7")
 
-# Modelo YOLOv8m (medium) - Optimizado para detección de objetos pequeños (balón)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 model = YOLO("yolov8m.pt")
 
 class AnalysisRequest(BaseModel):
     video_url: str
-    start_time: str  # MM:SS
-    end_time: str    # MM:SS
+    start_time: str
+    end_time: str
 
 class VisionEvent(BaseModel):
     timestamp: str
@@ -39,7 +47,6 @@ def seconds_to_timestamp(seconds):
     return f"{m:02d}:{s:02d}.{ms:02d}"
 
 def get_team_color(frame, box):
-    """Clasificación por color de uniforme usando análisis HSV en el torso"""
     x1, y1, x2, y2 = map(int, box)
     roi = frame[y1:y1+int((y2-y1)*0.4), x1:x2]
     if roi.size == 0: return "unknown"
@@ -63,6 +70,10 @@ def get_team_color(frame, box):
     if 95 < avg_h < 135: return "team_blue"
     if 20 < avg_h < 38: return "team_yellow"
     return "team_other"
+
+@app.get("/")
+async def root():
+    return {"status": "online", "version": "7.0.0", "engine": "YOLOv8m"}
 
 @app.post("/vision/analyze", response_model=List[VisionEvent])
 async def analyze_video(request: AnalysisRequest):
@@ -155,3 +166,4 @@ async def analyze_video(request: AnalysisRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
+
