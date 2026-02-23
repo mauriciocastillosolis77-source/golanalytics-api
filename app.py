@@ -9,8 +9,8 @@ from typing import List, Optional
 from ultralytics import YOLO
 import torch
 
-# VERSION: 2.0.0 - Soccer Vision Engine (YOLOv8 + Team Color + Reception)
-app = FastAPI(title="GolAnalytics Vision API v2")
+# VERSION: 3.0.0 - Soccer Vision Engine (YOLOv8 + Team Color + Reception + 10 FPS)
+app = FastAPI(title="GolAnalytics Vision API v3")
 
 # Modelo YOLOv8m (medium) - Optimizado para detección de objetos pequeños (balón)
 model = YOLO("yolov8m.pt")
@@ -33,25 +33,23 @@ def time_to_seconds(t_str):
     return int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
 
 def seconds_to_timestamp(seconds):
-    m, s = int(seconds // 60), int(seconds % 60)
+    m = int(seconds // 60)
+    s = int(seconds % 60)
     ms = int((seconds % 1) * 100)
     return f"{m:02d}:{s:02d}.{ms:02d}"
 
 def get_team_color(frame, box):
     """Clasificación por color de uniforme usando análisis HSV en el torso"""
     x1, y1, x2, y2 = map(int, box)
-    # Tomamos el tercio superior del cuerpo (torso) para evitar pantalones/medias/césped
     roi = frame[y1:y1+int((y2-y1)*0.4), x1:x2]
     if roi.size == 0: return "unknown"
     
     hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    # Filtramos el color verde del césped para que no ensucie el promedio
     lower_green = np.array([35, 40, 40])
     upper_green = np.array([85, 255, 255])
     mask = cv2.inRange(hsv_roi, lower_green, upper_green)
     non_green_roi = cv2.bitwise_and(hsv_roi, hsv_roi, mask=cv2.bitwise_not(mask))
     
-    # Extraemos píxeles no negros (los que pasaron el filtro de verde)
     pixels = non_green_roi.reshape(-1, 3)
     pixels = pixels[np.any(pixels != [0, 0, 0], axis=1)]
     
@@ -60,7 +58,6 @@ def get_team_color(frame, box):
     avg_h = np.mean(pixels[:, 0])
     avg_s = np.mean(pixels[:, 1])
     
-    # Clasificación simple por rangos de Hue (Matiz)
     if avg_s < 40: return "team_white"
     if avg_h < 15 or avg_h > 165: return "team_red"
     if 95 < avg_h < 135: return "team_blue"
@@ -76,7 +73,6 @@ async def analyze_video(request: AnalysisRequest):
     duration = max(0, end_s - start_s)
     
     try:
-        # Descarga el segmento usando ffmpeg de forma eficiente
         subprocess.run(['ffmpeg', '-ss', str(start_s), '-t', str(duration), '-i', request.video_url, '-c', 'copy', temp_video, '-y'], check=True, capture_output=True)
         
         events = []
@@ -86,7 +82,6 @@ async def analyze_video(request: AnalysisRequest):
         last_possession_id = None
         last_team = "unknown"
         
-        # Procesamiento a 10 FPS para no perder detalles de pases rápidos
         process_every = max(1, int(fps / 10))
         
         while cap.isOpened():
@@ -95,9 +90,6 @@ async def analyze_video(request: AnalysisRequest):
             
             if frame_count % process_every == 0:
                 current_time_rel = start_s + (frame_count / fps)
-                
-                # Inferencia con Tracking (ByteTrack)
-                # Classes: 0 (persona), 32 (balón de deporte)
                 results = model.track(frame, persist=True, classes=[0, 32], verbose=False, conf=0.25)
                 
                 boxes = results[0].boxes
@@ -111,7 +103,6 @@ async def analyze_video(request: AnalysisRequest):
                     if cls == 32: ball_box = b
                     elif cls == 0: players.append({"id": track_id, "box": b, "conf": conf})
                 
-                # Lógica de detección de eventos mecánicos
                 if ball_box is not None:
                     ball_center = np.array([(ball_box[0]+ball_box[2])/2, (ball_box[1]+ball_box[3])/2])
                     closest_player, min_dist = None, float('inf')
@@ -119,8 +110,6 @@ async def analyze_video(request: AnalysisRequest):
                     for p in players:
                         p_center = np.array([(p["box"][0]+p["box"][2])/2, (p["box"][1]+p["box"][3])/2])
                         dist = np.linalg.norm(ball_center - p_center)
-                        
-                        # Umbral de cercanía (en píxeles) para considerar posesión
                         if dist < 55 and dist < min_dist:
                             min_dist, closest_player = dist, p
                     
@@ -128,9 +117,7 @@ async def analyze_video(request: AnalysisRequest):
                         p_id = closest_player["id"]
                         current_team = get_team_color(frame, closest_player["box"])
                         
-                        # Cambio de posesión = Evento de Pase + Recepción
                         if last_possession_id is not None and last_possession_id != p_id:
-                            # Registramos la recepción del nuevo jugador
                             events.append(VisionEvent(
                                 timestamp=seconds_to_timestamp(current_time_rel),
                                 from_player=last_possession_id,
@@ -139,7 +126,6 @@ async def analyze_video(request: AnalysisRequest):
                                 event="reception",
                                 confidence=closest_player["conf"]
                             ))
-                            # Inferimos el pase del jugador anterior (un poco antes en el tiempo)
                             events.append(VisionEvent(
                                 timestamp=seconds_to_timestamp(max(start_s, current_time_rel - 0.2)),
                                 from_player=last_possession_id,
@@ -149,7 +135,6 @@ async def analyze_video(request: AnalysisRequest):
                                 confidence=0.85
                             ))
                         elif last_possession_id is None:
-                            # Primera posesión detectada en el clip
                             events.append(VisionEvent(
                                 timestamp=seconds_to_timestamp(current_time_rel),
                                 from_player=p_id,
@@ -157,15 +142,11 @@ async def analyze_video(request: AnalysisRequest):
                                 event="possession",
                                 confidence=closest_player["conf"]
                             ))
-                        
                         last_possession_id, last_team = p_id, current_team
-            
             frame_count += 1
             
         cap.release()
         if os.path.exists(temp_video): os.remove(temp_video)
-        
-        # Eliminar eventos duplicados muy cercanos en tiempo para limpiar el output
         return events
     except Exception as e:
         if os.path.exists(temp_video): os.remove(temp_video)
