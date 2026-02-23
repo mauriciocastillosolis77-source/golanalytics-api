@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8m.pt')"
 
 # Instalamos uvicorn explícitamente
-RUN pip install --no-cache-dir uvicorn
+RUN pip install --no-cache-dir uvicorn gunicorn
 
 COPY app.py .
 
