@@ -16,9 +16,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Descarga el modelo durante la construcción de la imagen para despliegues rápidos
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8m.pt')"
 
+# Usamos python -m uvicorn para asegurar que encuentre el ejecutable en el PATH
+# Se agregó gunicorn como alternativa por si Railway lo requiere por defecto
+RUN pip install --no-cache-dir gunicorn uvicorn
+
 COPY app.py .
 
 EXPOSE 8080
 
-# Usamos python -m uvicorn para asegurar que encuentre el ejecutable en el PATH
+# Forzamos el uso de uvicorn a través de python -m
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+
