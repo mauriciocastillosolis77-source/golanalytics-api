@@ -1,210 +1,159 @@
-import os
-import cv2
-import uuid
-import tempfile
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import json
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLO
-from supabase import create_client, Client
-import uvicorn
-
-app = FastAPI(title="GolAnalytics API - YOLO Tracking")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ── Supabase client ──────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-# ── YOLO model (se descarga automáticamente la primera vez) ──
-print("🤖 Cargando modelo YOLOv8n...")
-model = YOLO("yolov8n.pt")
-print("✅ Modelo YOLOv8n listo")
-
-
-# ── Health check ─────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "model": "YOLOv8n",
-        "service": "golanalytics-api"
-    }
-
-
-# ── Endpoint principal: procesar video ───────────────────────
-@app.post("/process-video")
-async def process_video(
-    file: UploadFile = File(...),
-    job_id: str = Form(None),
-    video_id: str = Form(...),
-    match_id: str = Form(...),
-    team_id: str = Form(...),
-):
-    if not video_id or not match_id or not team_id:
-        raise HTTPException(
-            status_code=400,
-            detail="video_id, match_id y team_id son requeridos"
-        )
-
-    # Actualizar job a 'processing'
-    if job_id:
-        supabase.table("tracking_jobs").update({
-            "status": "processing"
-        }).eq("id", job_id).execute()
-
-    tmp_path = None
+import base64
+from io import BytesIO
+from PIL import Image
+import tensorflow as tf
+from tensorflow import keras
+import cv2
+import os
+model_path = 'golanalytics_vision_model.keras'
+# Descargar modelo si no existe
+if not os.path.exists(model_path):
+    print("📥 Modelo no encontrado, descargando...")
+    import download_model
+else:
+    print("✅ Modelo ya existe localmente")
+app = Flask(__name__)
+CORS(app)
+# Cargar modelo al iniciar
+print("🤖 Cargando modelo...")
+model = keras.models.load_model(model_path)
+print("✅ Modelo cargado")
+# Cargar nombres de clases
+with open('class_names.json', 'r', encoding='utf-8') as f:
+    class_names = json.load(f)
+print(f"✅ {len(class_names)} clases cargadas")
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "running",
+        "model": "GolAnalytics Vision",
+        "classes": len(class_names),
+        "message": "API funcionando correctamente"
+    })
+def preprocess_image(image_base64):
+    """Helper function to preprocess a single image"""
+    # Decodificar imagen
+    image_data = base64.b64decode(image_base64.split(',')[1] if ',' in image_base64 else image_base64)
+    image = Image.open(BytesIO(image_data))
+    
+    # Convertir a formato correcto
+    image = image.convert('RGB')
+    image = np.array(image)
+    
+    # Preprocesar
+    image = cv2.resize(image, (224, 224))
+    image = image.astype(np.float32) / 255.0
+    
+    return image
+@app.route('/predict', methods=['POST'])
+def predict():
     try:
-        # Guardar video en disco temporal
-        suffix = os.path.splitext(file.filename)[-1] or ".mp4"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        print(f"📹 Video guardado temporalmente: {tmp_path}")
-
-        # Abrir video con OpenCV
-        cap = cv2.VideoCapture(tmp_path)
-        if not cap.isOpened():
-            raise HTTPException(status_code=400, detail="No se pudo abrir el video")
-
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        # Procesar 2 frames por segundo
-        sample_interval = max(1, int(fps / 2))
-        total_sampled = total_video_frames // sample_interval
-
-        print(f"📊 FPS: {fps}, Total frames: {total_video_frames}, Muestreo cada: {sample_interval} frames")
-
-        # Actualizar total_frames en job
-        if job_id:
-            supabase.table("tracking_jobs").update({
-                "total_frames": total_sampled
-            }).eq("id", job_id).execute()
-
-        frame_number = 0
-        processed_count = 0
-        batch = []
-        BATCH_SIZE = 30  # Insertar en Supabase cada 30 frames
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_number % sample_interval == 0:
-                second = frame_number / fps
-
-                # YOLO detección — solo clase 0 (person)
-                results = model.track(frame, classes=[0], verbose=False, persist=True)[0]
-
-                players = []
-                h, w = frame.shape[:2]
-
-                if results.boxes is not None:
-                    for box in results.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        conf = float(box.conf[0])
-
-                        # track_id disponible solo con model.track()
-                        track_id = int(box.id[0]) if box.id is not None else -1
-
-                        # Solo incluir detecciones con confianza >= 0.3
-                        if conf >= 0.3:
-                            players.append({
-                                "track_id": track_id,
-                                "x": round(x1 / w, 4),
-                                "y": round(y1 / h, 4),
-                                "width": round((x2 - x1) / w, 4),
-                                "height": round((y2 - y1) / h, 4),
-                                "confidence": round(conf, 3)
-                            })
-
-                batch.append({
-                    "job_id": job_id,
-                    "video_id": video_id,
-                    "match_id": match_id,
-                    "team_id": team_id,
-                    "frame_number": frame_number,
-                    "second_in_video": round(second, 2),
-                    "players": players
-                })
-
-                processed_count += 1
-
-                # Guardar batch en Supabase
-                if len(batch) >= BATCH_SIZE:
-                    supabase.table("player_tracking").insert(batch).execute()
-                    batch = []
-                    print(f"💾 Guardados {processed_count}/{total_sampled} frames")
-
-                    # Actualizar progreso en job
-                    if job_id:
-                        supabase.table("tracking_jobs").update({
-                            "processed_frames": processed_count
-                        }).eq("id", job_id).execute()
-
-            frame_number += 1
-
-        cap.release()
-
-        # Guardar último batch pendiente
-        if batch:
-            supabase.table("player_tracking").insert(batch).execute()
-
-        # Marcar job como completado
-        if job_id:
-            supabase.table("tracking_jobs").update({
-                "status": "completed",
-                "processed_frames": processed_count,
-                "completed_at": "now()"
-            }).eq("id", job_id).execute()
-
-        print(f"✅ Procesamiento completado: {processed_count} frames")
-
-        return {
+        data = request.get_json()
+        
+        # Obtener imagen en base64
+        image_base64 = data.get('image', '')
+        if not image_base64:
+            return jsonify({"success": False, "error": "No image provided"}), 400
+        
+        # Preprocesar imagen
+        image = preprocess_image(image_base64)
+        image = np.expand_dims(image, axis=0)
+        
+        # Predecir
+        predictions = model.predict(image, verbose=0)[0]
+        
+        # Obtener top 3
+        top_indices = np.argsort(predictions)[-3:][::-1]
+        
+        results = []
+        for idx in top_indices:
+            results.append({
+                "action": class_names[str(idx)],
+                "probability": float(predictions[idx])
+            })
+        
+        return jsonify({
             "success": True,
-            "job_id": job_id,
-            "video_id": video_id,
-            "total_frames_processed": processed_count,
-            "fps_sampled": 2
-        }
-
+            "predictions": results
+        })
+        
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        # Marcar job como fallido
-        if job_id:
-            supabase.table("tracking_jobs").update({
-                "status": "failed",
-                "error_message": str(e)
-            }).eq("id", job_id).execute()
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+@app.route('/analyze-batch', methods=['POST'])
+def analyze_batch():
+    try:
+        data = request.get_json()
+        
+        # Obtener array de frames
+        frames = data.get('frames', [])
+        if not frames or not isinstance(frames, list):
+            return jsonify({"success": False, "error": "No frames provided or invalid format"}), 400
+        
+        if len(frames) > 50:
+            return jsonify({"success": False, "error": "Maximum 50 frames per batch"}), 400
+        
+        # Preprocesar todas las imágenes
+        processed_images = []
+        valid_indices = []
+        
+        for idx, frame_data in enumerate(frames):
+            try:
+                image_base64 = frame_data.get('image', '')
+                if image_base64:
+                    image = preprocess_image(image_base64)
+                    processed_images.append(image)
+                    valid_indices.append(idx)
+            except Exception as e:
+                print(f"Error processing frame {idx}: {str(e)}")
+                continue
+        
+        if not processed_images:
+            return jsonify({"success": False, "error": "No valid frames to process"}), 400
+        
+        # Convertir a batch
+        batch = np.array(processed_images)
+        
+        # Predecir en batch (más eficiente)
+        predictions_batch = model.predict(batch, verbose=0)
+        
+        # Procesar resultados
+        results = []
+        for idx, predictions in zip(valid_indices, predictions_batch):
+            # Obtener top 3
+            top_indices = np.argsort(predictions)[-3:][::-1]
+            
+            frame_results = []
+            for pred_idx in top_indices:
+                frame_results.append({
+                    "action": class_names[str(pred_idx)],
+                    "probability": float(predictions[pred_idx])
+                })
+            
+            results.append({
+                "frame_index": idx,
+                "timestamp": frames[idx].get('timestamp', 0),
+                "predictions": frame_results
+            })
+        
+        return jsonify({
+            "success": True,
+            "total_frames": len(frames),
+            "processed_frames": len(results),
+            "results": results
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
 
-    finally:
-        # Borrar video del disco siempre, sin importar si hubo error
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            print(f"🗑️ Video temporal borrado: {tmp_path}")
-
-
-# ── Consultar estado del job ──────────────────────────────────
-@app.get("/job-status/{job_id}")
-def job_status(job_id: str):
-    result = supabase.table("tracking_jobs").select("*").eq("id", job_id).single().execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Job no encontrado")
-    return result.data
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
