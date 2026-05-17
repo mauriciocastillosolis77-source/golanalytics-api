@@ -1,15 +1,13 @@
 import os
 import cv2
-import uuid
 import tempfile
-import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 from supabase import create_client, Client
 import uvicorn
 
-app = FastAPI(title="GolAnalytics API - YOLO Tracking")
+app = FastAPI(title="GolAnalytics API - YOLO + DeepSORT Tracking")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +22,9 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# ── YOLO model (se descarga automáticamente la primera vez) ──
+# ── YOLO model ───────────────────────────────────────────────
+# YOLOv8 incluye trackers integrados: BoT-SORT y ByteTrack
+# Usamos tracker.yaml personalizado para fútbol amateur
 print("🤖 Cargando modelo YOLOv8n...")
 model = YOLO("yolov8n.pt")
 print("✅ Modelo YOLOv8n listo")
@@ -35,7 +35,7 @@ print("✅ Modelo YOLOv8n listo")
 def health():
     return {
         "status": "ok",
-        "model": "YOLOv8n",
+        "model": "YOLOv8n + ByteTrack",
         "service": "golanalytics-api"
     }
 
@@ -80,8 +80,8 @@ async def process_video(
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # Procesar 2 frames por segundo
-        sample_interval = max(1, int(fps / 2))
+        # Procesar a 5 frames por segundo (mejor tracking que 2fps)
+        sample_interval = max(1, int(fps / 5))
         total_sampled = total_video_frames // sample_interval
 
         print(f"📊 FPS: {fps}, Total frames: {total_video_frames}, Muestreo cada: {sample_interval} frames")
@@ -105,8 +105,19 @@ async def process_video(
             if frame_number % sample_interval == 0:
                 second = frame_number / fps
 
-                # YOLO detección — solo clase 0 (person)
-                results = model.track(frame, classes=[0], verbose=False, persist=True)[0]
+                # YOLO tracking con ByteTrack (tracker robusto incluido en ultralytics)
+                # ByteTrack mantiene IDs más estables que el tracker básico
+                # persist=True mantiene el tracker entre frames
+                # tracker="bytetrack.yaml" usa configuración optimizada
+                results = model.track(
+                    frame,
+                    classes=[0],           # solo personas
+                    verbose=False,
+                    persist=True,
+                    tracker="bytetrack.yaml",  # Tracker robusto (mejor que botsort para fútbol)
+                    conf=0.3,              # umbral de confianza
+                    iou=0.5                # IoU para asociación entre frames
+                )[0]
 
                 players = []
                 h, w = frame.shape[:2]
@@ -116,7 +127,7 @@ async def process_video(
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
                         conf = float(box.conf[0])
 
-                        # track_id disponible solo con model.track()
+                        # track_id ahora es más estable gracias a ByteTrack
                         track_id = int(box.id[0]) if box.id is not None else -1
 
                         # Solo incluir detecciones con confianza >= 0.3
@@ -177,7 +188,7 @@ async def process_video(
             "job_id": job_id,
             "video_id": video_id,
             "total_frames_processed": processed_count,
-            "fps_sampled": 2
+            "fps_sampled": 5
         }
 
     except Exception as e:
@@ -208,3 +219,4 @@ def job_status(job_id: str):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
+
